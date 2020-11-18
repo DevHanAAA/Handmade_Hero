@@ -2,77 +2,120 @@
 * @Author: Jin
 * @Date:   2020-11-14 20:17:42
 * @Last Modified by:   Jin
-* @Last Modified time: 2020-11-14 20:21:33
+* @Last Modified time: 2020-11-17 19:21:06
 */
-
 #include <windows.h>
+#include <stdint.h>
 
 #define internal static // function is local to the file
 #define local_persist static // persist, retain the value
 #define global_variable static // Not preferred method, temporary
+
+typedef uint8_t uint8;
+typedef uint16_t uint16;
+typedef uint32_t uint32;
+typedef uint64_t uint64;
+
+typedef int8_t int8;
+typedef int16_t int16;
+typedef int32_t int32;
+typedef int64_t int64;
 
 //TODO(Han):this is global for now (sometimes something will popup when user tries to close. so we can implement this in different way)
 global_variable bool Running; // Ver.3
 
 global_variable BITMAPINFO BitmapInfo; // We only care about bmiHeader
 global_variable void* BitmapMemory; // "Actual memory" we are going to receive back to window. we used void because we don't know format of the things to which it is pointing to, we will cast it for the format we actually want to use
-global_variable HBITMAP BitmapHandle; // Handle to a bitmap
-global_variable HDC BitmapDeviceContext;
+global_variable int BitmapWidth;
+global_variable int BitmapHeight;
+global_variable int BytesPerPixel = 4;
+
+internal void
+RenderWeiredGradient(int BlueOffset, int GreenOffset)
+{
+  int Width = BitmapWidth;
+  int Height = BitmapHeight;
+// Draw Window
+  int Pitch = Width*BytesPerPixel; // Difference between row and next row, How big each individual row
+  uint8 *Row = (uint8 *)BitmapMemory;
+  for(int Y = 0;
+      Y< BitmapHeight;
+      ++Y)
+  {
+    uint32 *Pixel = (uint32 *)Row;
+    for(int X = 0;
+            X < BitmapWidth;
+            ++X)
+    {
+      //
+      uint8 Blue = (X + BlueOffset);
+      uint8 Green = (Y + GreenOffset);
+
+    /*
+      Memory:   BB GG RR xx (Blue 8bit, Green 8bit, Red 8bit, xx 8bit)
+      Register: xx RR GG BB => Little Endian Load
+      Pixel (32-bits)
+    */
+    *Pixel++ = ((Green << 8) | Blue << 0); // Access Memory pointed to Pixel => @Custom
+    }
+
+  Row += Pitch;
+  }
+}
 
 //Displaying GDI
 internal void
 Win32ResizeDIBSection(int Width, int Height) // Device Independent Bitmap => Search for "ResizeDIBSection"
 {
-	// TODO(Han): Bulletproof this
-	// May be don't free first, free after, then free first if that fails.
+// Free Memory
+  if (BitmapMemory)
+  {
+    VirtualFree(BitmapMemory,
+                0,
+                MEM_RELEASE // Relase memory to OS
+                );
+  }
 
-	 // Free our DIBSection
-	if (BitmapHandle) // if function fails return value is null, so we will have to delete Bitmaphandle
-	{
-		DeleteObject(BitmapHandle); // Search for "DeleteObject"
-	}
-	if (!BitmapDeviceContext) // if we don't have BitmapDeviceContextr
-	{
-		// TODO(Han): Should we recreate these under certain special circumstances? (What if some user change the resolution?)
-		BitmapDeviceContext = CreateCompatibleDC(0); // Search for "CreateCompatibleDC"
-	}
-
+  BitmapWidth = Width;
+  BitmapHeight = Height;
 	// Allocate BITMAP (// Search for "BITMAPINFO")
 	// Search for "BITMAPINFOHEADER"
 	BitmapInfo.bmiHeader.biSize = sizeof(BitmapInfo.bmiHeader); // # Bytes => How big is the structure actually is? find out structure itself by using "sizeof", should not include color table "bmiColors" so you should not use sizeof(BitmapInfo);
-	BitmapInfo.bmiHeader.biWidth = Width; // Width
-	BitmapInfo.bmiHeader.biHeight = Height; // Height
+	BitmapInfo.bmiHeader.biWidth = BitmapWidth; // Width
+	BitmapInfo.bmiHeader.biHeight = -BitmapHeight; // Height, Row goes from Top-Down (-BitmapHeight)
 	BitmapInfo.bmiHeader.biPlanes = 1; // Always 1
 	BitmapInfo.bmiHeader.biBitCount = 32; // # of bit per pixel, 8 bit for red,green,blue each + @
 	BitmapInfo.bmiHeader.biCompression = BI_RGB; // We don't want compression
 
-	/* IGNORE(Han) All Default to zero because we declared BitmapInfo as global_variable
-	BitmapInfo.bmiHeader.biSizeImage = 0; // Set 0 since we don't have compression format
-	BitmapInfo.bmiHeader.biXPelsPerMeter = 0;  // For Pixel per meter
-	BitmapInfo.bmiHeader.biYPelsPerMeter = 0;
-	BitmapInfo.bmiHeader.biClrUsed = 0; // How many colors are used in the color table? We do not have color table
-	BitmapInfo.bmiHeader.biClrImportant = 0; // We don't have any index PAL stuff
-	*/
+  // NOTE(HAN): Clarifying the deal with StretchDITits & BitBlt
+  // No more DC for us.
+  int BitmapMemorySize = (BitmapWidth*BitmapHeight)*BytesPerPixel; // Size of BitmapMemory
+  BitmapMemory = VirtualAlloc(0, // We don't care where the memory is
+                              BitmapMemorySize,
+                              MEM_COMMIT, // Tell Windows that we will use the memory from
+                              PAGE_READWRITE // READ & Write Access to memory
+                              ); // Allocates a certain # of mamory pages
 
-	// TODO(Han): May be we  can just allocate this ourselves?
-	BitmapHandle = CreateDIBSection( // Ask Windows to create Bitmap => Search for "CreateDIBSection"
-		BitmapDeviceContext,
-		&BitmapInfo, // We will fill this info
-		DIB_RGB_COLORS, // iUsage, PAL or RGB => We use RGB
-		&BitmapMemory, // **ppvBits,Pointer to Bits, Actual memory
-		0, // hSection, Don't care
-		0 // dwOffset, Referencing hSection
-	);
+  // TODO(Han): Probably clear this to black
 }
 
+// WINDOWS asks us to repaint
 internal void
-Win32UpdateWindow(HDC DeviceContext, int X, int Y, int Width, int Height)
+Win32UpdateWindow(HDC DeviceContext,
+                  RECT *ClientRect, // Size of window RECT
+                  int X, int Y, int Width, int Height)
 {
-	StretchDIBits // For scale the window => Turns out to be bad call later => Search for StretchDIBITS
+  int WindowWidth = ClientRect->right - ClientRect->left;
+  int WindowHeight = ClientRect->bottom - ClientRect->top;
+	StretchDIBits // For scale the window (gdi32.lib) => Turns out to be bad call later => Search for "StretchDIBITS"
 	(
 		DeviceContext,
+    /*
 		X, Y, Width, Height, // Window we want to draw
 		X, Y, Width, Height, // Buffer, Src, Backbuffer is the same size as Window
+    */
+    0, 0, BitmapWidth, BitmapHeight, // Whole Bitmap
+    0, 0, WindowWidth, WindowHeight, // to whole window
 		BitmapMemory, // Pointer to Bits
 		&BitmapInfo, // Pointer to Bitmap Info
 		DIB_RGB_COLORS, // type of buffer (PAL or RGB) => Always RGB
@@ -103,8 +146,6 @@ Win32MainWindowCallback(
 
 	case WM_CLOSE: // When the user clicks "X" in the window
 	{
-		// PostQuitMessage(0); //Ver.1
-		// DestroyWindow(Window); // Ver.2
 		//TODO(HAN): Handle this with a message to the user?
 		Running = false; // Ver.3
 	} break;
@@ -116,7 +157,6 @@ Win32MainWindowCallback(
 
 	case WM_DESTROY: // When Windows deletes the window, We may want to treat this an error => Maybe Recreate window?
 	{
-		// PostQuitMessage(0); // Ver.2
 		//TODO(HAN): Handle this as an error - recreate window?
 		Running = false; // Ver.3
 	} break;
@@ -130,7 +170,11 @@ Win32MainWindowCallback(
 		LONG Y = Paint.rcPaint.top;
 		LONG Width = Paint.rcPaint.right - Paint.rcPaint.left; // Width
 		LONG Height = Paint.rcPaint.bottom - Paint.rcPaint.top; // Height
-		Win32UpdateWindow(DeviceContext, X, Y, Width, Height); // Call
+
+		RECT ClientRect;
+    GetClientRect(Window, &ClientRect);
+
+		Win32UpdateWindow(DeviceContext, &ClientRect, X, Y, Width, Height); // Call
 		EndPaint(Window, &Paint);
 	} break;
 
@@ -161,12 +205,12 @@ int CALLBACK WinMain(HINSTANCE Instance,
 
 	if (RegisterClassA(&WindowClass))
 	{
-		HWND WindowHandle =
+		HWND Window =
 			CreateWindowExA(
 				0, // Extended Style
 				WindowClass.lpszClassName, // Class Name
 				"Handmade Hero",  // Window Name
-				WS_OVERLAPPEDWINDOW | WS_VISIBLE, // Window Style
+				WS_OVERLAPPEDWINDOW|WS_VISIBLE, // Window Style
 				CW_USEDEFAULT,// X
 				CW_USEDEFAULT,// Y
 				CW_USEDEFAULT, // Width
@@ -176,24 +220,44 @@ int CALLBACK WinMain(HINSTANCE Instance,
 				Instance, // Instance
 				0 // passing parameter to window? No
 			);
-		if (WindowHandle)
+		if (Window)
 		{
+        int XOffset = 0;
+        int YOffset = 0;
 			Running = true; // set window running set "true"
 			// Keep running until GetMessage returns false
 			while (Running) // Message Queue
 			{
-				MSG Message;
-				BOOL MessageResult = GetMessageA(&Message, 0, 0, 0); // Search for "GetMessage"
-				if (MessageResult > 0)
-				{
-					TranslateMessage(&Message);
-					DispatchMessageA(&Message);
-				}
-				else
-				{
-					break; // break out of for loop
-				}
 
+        MSG Message;
+         while(PeekMessageA(
+           &Message, // Address of Message
+           0, // Window Handle
+           0, // FIlter
+           0, // Filter
+           PM_REMOVE // Queue
+            ))
+         {
+          if(Message.message == WM_QUIT)
+          {
+            Running = false;
+          }
+          //Process the queue
+          TranslateMessage(&Message);
+          DispatchMessageA(&Message);
+         }
+
+           RenderWeiredGradient(XOffset, YOffset);
+
+           HDC DeviceContext = GetDC(Window);
+           RECT ClientRect;
+           GetClientRect(Window, &ClientRect);
+           int WindowWidth = ClientRect.right - ClientRect.left; // Not a pointer
+          int WindowHeight = ClientRect.bottom - ClientRect.top;
+           Win32UpdateWindow(DeviceContext, &ClientRect, 0, 0, WindowWidth, WindowHeight); // Call
+           ReleaseDC(Window, DeviceContext);
+           ++XOffset; // @Custom => Animation Speed in X-axis
+		   // YOffset += 5; // @Custom => Animation Speed in Y-axis
 			}
 		}
 
